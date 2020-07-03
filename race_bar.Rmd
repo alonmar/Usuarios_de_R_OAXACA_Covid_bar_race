@@ -1,0 +1,196 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+# Cargamos paquetes
+
+```{r}
+library(tidyverse)
+library(gganimate)
+library(ggrepel)
+library(hrbrthemes)
+library(lubridate)
+```
+
+# Eliminamos los datos si anteriormente los hemos descargado
+
+```{r}
+file <- list.files("data", pattern = ".csv$") 
+file.remove(str_glue("data/{file}"))
+```
+
+# Descargamos los datos 
+
+```{r}
+activity_url <- "http://187.191.75.115/gobmx/salud/datos_abiertos/datos_abiertos_covid19.zip"
+download.file(activity_url,"data_download", mode="wb")
+```
+
+# Descomprimimos
+
+```{r}
+
+unzip("data_download", exdir = "data")
+```
+
+# Cargamos los datos
+
+```{r}
+file <- list.files("data", pattern = ".csv$") 
+data <- read_csv(str_glue("data/{file}"))
+```
+
+# Solo nos quedamos con los casos de Oaxaca
+
+```{r}
+oaxaca <- data %>% 
+  filter(ENTIDAD_RES == 20)
+```
+
+# Contamos los casos por fecha y municipio 
+
+```{r}
+data_count <- oaxaca %>% 
+  count(FECHA_SINTOMAS, MUNICIPIO_RES) %>% 
+  arrange(FECHA_SINTOMAS)
+```
+
+# Creamos una dataset con todos los dias consecutivos
+
+```{r}
+municipios <- data_count$MUNICIPIO_RES %>% unique()
+fechas <- seq(ymd('2020-01-03'),ymd('2020-06-29'),by='days')
+
+full_data <- tibble(FECHA_SINTOMAS = fechas %>% rep(length(municipios)) %>% sort(), 
+                        MUNICIPIO_RES = municipios %>% rep(length(fechas)))
+```
+
+# Unimos ambos datasets
+
+```{r}
+join_data <- full_data %>% left_join(data_count) %>% 
+  arrange(FECHA_SINTOMAS)
+join_data$n[is.na(join_data$n)] <- 0
+
+```
+
+# Creamos la columna 'suma_acumulada' 
+
+```{r}
+sum_data <- join_data %>% 
+  group_by( MUNICIPIO_RES) %>% 
+  mutate(suma_acumulada=cumsum( n), ) %>% 
+  filter(suma_acumulada > 0) 
+```
+
+# Obtenemos los 10 municipios que hasta el momento presentan más casos
+
+```{r}
+top10 <- sum_data %>% 
+  filter(FECHA_SINTOMAS  == "2020-06-28") %>%
+  arrange(desc(suma_acumulada)) %>% 
+  head(10)
+
+result_top10 <-  sum_data %>% 
+  filter(MUNICIPIO_RES %in% top10$MUNICIPIO_RES)
+```
+
+# Damos un rank de acuerdo al total de casoso acumulados 
+
+```{r}
+sum_result <- result_top10 %>% 
+  group_by( FECHA_SINTOMAS) %>% 
+  mutate(rank = min_rank(-suma_acumulada)) %>%
+  mutate(rank2 = lag(rank)) %>% 
+  arrange( FECHA_SINTOMAS, desc(suma_acumulada), desc(rank2)) %>% 
+  mutate(rank3 = row_number())
+```
+
+# Agregamos los nombres de los municipios
+
+```{r}
+nombres_municipios <- read_csv("nombres_muinicipios.csv") %>% 
+  mutate(NOM_MUN = NOM_MUN %>% str_to_upper())
+
+sum_result_top10 <-  sum_result %>% 
+  left_join(nombres_municipios, by = c("MUNICIPIO_RES" = "CVE_MUN"))
+```
+
+# Creamos la grafica
+
+```{r}
+
+static_plot <- ggplot(sum_result_top10,
+                    aes(rank3,group=NOM_MUN,fill=as.factor(NOM_MUN),color=as.factor(NOM_MUN))) +
+  geom_tile(aes(y = suma_acumulada/2,
+                height = suma_acumulada,
+                width = 0.9), alpha = 0.8, color = NA) +
+  geom_text(aes(y = 0, label = paste(str_wrap(NOM_MUN, 20))),
+            hjust = "right", colour = "gray19", fontface = "bold") +
+  geom_text(aes(y=suma_acumulada,label = paste(" " ,scales::comma(suma_acumulada, accuracy = 1))),  
+            hjust=0, colour = "gray30", fontface = "bold")+
+  coord_flip(clip = "off", expand = TRUE) +
+  scale_fill_viridis_d(direction = -1) +
+  scale_x_reverse() +
+  scale_y_continuous(labels = scales::comma, breaks = c(0, 500, 1000, 1500, 2000, 2500) ) +
+  guides(color = FALSE, fill = FALSE) +
+  theme_minimal() +
+  theme(
+    plot.title=element_text(size=25, hjust=0.5, face="bold", colour="grey", vjust=-1),
+    plot.subtitle=element_text(size=18, hjust=0.5, face="italic", color="grey"),
+    plot.caption =element_text(size=8, hjust=0.5, face="italic", color="grey"),
+    axis.ticks.y = element_blank(), 
+    axis.text.y = element_blank(), 
+    axis.text.x = element_blank(), 
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    plot.margin = margin(1,1,1,4, "cm")
+  ) 
+
+
+```
+
+```{r}
+plt<-static_plot + transition_states(states = FECHA_SINTOMAS, 
+                                     transition_length = 4, 
+                                     state_length = 1
+                                     ) + 
+  view_follow(fixed_x = T, fixed_y = T) +
+  labs(title = 'Total de casos acumulados : {closest_state}', 
+       subtitle = 'Top 10 Municipios',
+       caption = 'Fuente de datos : SINAVE/DGE/InDRE',
+       x='',y='')
+
+
+```
+
+# Guardamos como mp4
+
+```{r}
+final_animation<-animate(plt,20,
+                         fps = 60,
+                         duration = 40, 
+                         width = 1280, 
+                         height = 720 , 
+                         renderer = ffmpeg_renderer(),
+                         rewind = T)
+
+gganimate::anim_save("resultado720.mp4", animation = last_animation())
+```
+
+# guardamos como gif
+```{r}
+final_animation<-animate(plt,20,
+                         fps = 60,
+                         duration = 40, 
+                         width = 1280, 
+                         height = 720 , 
+                         renderer = gifski_renderer(),
+                         rewind = T)
+
+gganimate::anim_save("resultado.gif", animation = last_animation())
+```
+
+
+
+
